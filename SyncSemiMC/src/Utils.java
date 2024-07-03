@@ -66,15 +66,16 @@ public class Utils {
         return new Data(train_buffer, stream_buffer, dim);
     }
     
-    public static HashSet<Integer> assignPartialLabel(ArrayList<SyncObject> list, int percentage){
+    public static void assignPartialLabel(ArrayList<SyncObject> list, int percentage){
         int noofsamples = (int) (list.size() * percentage / 100);
         HashSet<Integer> tnos = (HashSet<Integer>) generateRandomNumbers(0, list.size()-1, noofsamples);
+        //System.out.println("no of labele per chunk = "+tnos.size());
         Iterator<Integer> randomIndexIterator = tnos.iterator();
         while (randomIndexIterator.hasNext()) {
             Integer randomIndex = randomIndexIterator.next();
             list.get(randomIndex).setLabel_flg(1);
         }
-        return tnos;
+        //return tnos;
     }
     
     

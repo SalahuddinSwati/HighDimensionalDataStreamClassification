@@ -1,5 +1,8 @@
 
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -27,10 +30,11 @@ public class SyncSemiMC {
     public static int perofsample = 10;
     private String datasetFile;
     private String sp;
-    public float lamba = 0.000002f;
-    public float wT = 0.06f;
+    public float lamba = 0.0001f;//3->0.0009, 0.15: 8 -> 0.0001, 0.12: 20-> 0.00001, 0.26
+    public float wT = 0.15f;
     public int Plocal = 0;
     public int PGlobal = 0;
+    public int chunkSize = 1000;
 
     public SyncSemiMC(String fn, String sp, int[] labelPercentage, int eK) {
         this.datasetFile = fn;
@@ -40,159 +44,150 @@ public class SyncSemiMC {
         // TODO code application logic here
     }
 
-    public void startProcess() throws IOException {
+    public void startProcess(String dname) throws IOException {
         Utils.Data data = Utils.readData(datasetFile, sp, Dinit);
-        HashSet<Integer> partialLabelStream = new HashSet<Integer>();
-        HashSet<Integer> partialLabelTrain = new HashSet<Integer>();
         double Acc;
+        StringBuffer accb = new StringBuffer();
+        String result_path = "F:\\PhD_Study\\Revision_results\\RBFHYP\\semiSync\\";
         for (int i = 0; i < labelPercentage.length; i++) {
             // clear all prvious label flags to reset partial label process
-            clearLabels(data.getStream_buffer(), partialLabelStream, 0);
-            clearLabels(data.getTrain_buffer(), partialLabelTrain, 0);
+            clearLabels(data.getStream_buffer());
+            clearLabels(data.getTrain_buffer());
             // partial label the data
-            partialLabelStream = Utils.assignPartialLabel(data.getStream_buffer(), labelPercentage[i]);
-            partialLabelTrain = Utils.assignPartialLabel(data.getTrain_buffer(), 90);
+            //Utils.assignPartialLabel(data.getStream_buffer(), labelPercentage[i]);
+            Utils.assignPartialLabel(data.getTrain_buffer(), 90);
 
             double eRL = eRangData(data.getTrain_buffer(), eK);
 
             System.out.println("Local e-Rang =" + eRL);
 
-            ArrayList<MicroCluster> LocalM = clustering(data.getTrain_buffer(), eRL);
-
-            System.out.println("Local Model Size(MCs) =" + LocalM.size());
-            //label propogate
-            ArrayList<Integer> listofUnlabeled = new ArrayList<Integer>();
-            for (int j = 0; j < LocalM.size(); j++) {
-                if (LocalM.get(j).label_flg == 0) {
-                    listofUnlabeled.add(j);
-                }
-            }
-            double eRG = eRangMC(LocalM, eK);
-            labelPropogate(LocalM, listofUnlabeled, eRG);
-            //label propogation count
-            int proLabelCount = labelPorgCount(LocalM);
-
-            System.out.println("Total label Propogated= " + proLabelCount);
-            //Strat of stream
+            ArrayList<MicroCluster> Model = clustering(data.getTrain_buffer(), eRL, 1);
+            System.out.println("Local Model Size(MCs) =" + Model.size());
+            //start stream
             int currTime = 0;
             int TotalnewUnLabdeld = 0;
+            
             Iterator<SyncObject> iterator1 = data.getStream_buffer().iterator();
             int correct = 0;
             Acc = 0;
+            int total_ins = 0;
+            int b = 0;
+            StringBuffer actual_predicted = new StringBuffer();
+            ArrayList<SyncObject> chunkBuffer = new ArrayList<SyncObject>();
             while (iterator1.hasNext()) {
                 SyncObject ins_obj = iterator1.next();
                 currTime++;
-                ArrayList<Integer> p_label_idx = classify(ins_obj, LocalM, eRG);
+                total_ins++;
+                chunkBuffer.add(ins_obj);
+                ArrayList<Integer> p_label_idx = classify(ins_obj, Model);
                 int p_label = p_label_idx.get(0);
                 int mc_idx = p_label_idx.get(1);
+                actual_predicted.append(ins_obj.label).append("\t");
+                actual_predicted.append(p_label).append("\n");
                 if (p_label == ins_obj.label) {
                     correct++;
                 }
-                //error driven represenation
-                if (ins_obj.label_flg == 1) 
-                {
-                    if (ins_obj.label == p_label) {
-                        double w = LocalM.get(mc_idx).weigth + 1;
-                        LocalM.get(mc_idx).setWeigth(w);
-                    } else {
-                        double w = LocalM.get(mc_idx).weigth - 1;
-                        LocalM.get(mc_idx).setWeigth(w);
-                    }
-                }
-                //weight over time and del outdated mcs
-//                int mcDelonTime = LocalM.size();
-//                int mcDelonTimeflg = 0;
-                updateModel(LocalM, currTime);
-//                if (mcDelonTime - LocalM.size() != 0) {
-//                    mcDelonTimeflg = 1;
-//                }
-                //incrementally add or create a new MC
-                nnDistIndex nearest_MC = nearestSearchModel(ins_obj, LocalM, 1);
-                int MCindex = nearest_MC.index[0];
-                double MCdist = nearest_MC.dist[0];
-                double MCradius = LocalM.get(MCindex).radius;
-                int mcCreateflg = 0;
-                if (MCdist <= MCradius) {
-                    updateMC(ins_obj, MCindex, LocalM, currTime);
-                } else {
-                    createMC(ins_obj, LocalM, currTime, MCradius);
-                    mcCreateflg = 1;
-                }
-
-                Acc = ((double) correct / currTime) * 100;
-                if (currTime % 1000 == 0) {
-                    //eRG = eRangMC(LocalM, eK);
+                if (chunkBuffer.size() == chunkSize) {
+                    System.out.println("Model size Before =" + Model.size());
+                    updateModel(Model, chunkBuffer, currTime, labelPercentage[i], eRL);
+                    System.out.println("Model size After =" + Model.size());
+                    b++;
+                    Acc = ((double) correct / total_ins) * 100;
+                    //System.out.println("Label Per = " + labelPercentage[i]);
+                    System.out.println("Block No = " + b);
                     System.out.println("Accuracy = " + Acc);
-                   // System.out.println("Local Prediciton = " + Plocal);
-                    System.out.println("Example= " + currTime);
                 }
-//                if (mcDelonTimeflg == 1 || mcCreateflg == 1) {
-//                    //label propogate
-//                    ArrayList<Integer> listofUnlabelednew = new ArrayList<Integer>();
-//                    for (int j = 0; j < LocalM.size(); j++) {
-//                        if (LocalM.get(j).label_flg == 0) {
-//                            listofUnlabelednew.add(j);
-//                        }
-//                    }
-//                    eRG = eRangMC(LocalM, eK);
-//                    int proLableOld = labelPorgCount(LocalM);
-//                    labelPropogate(LocalM, listofUnlabelednew, eRG);
-//                    int proLablenew = labelPorgCount(LocalM);
-//                    // System.out.println("Total label Propogated= " + (proLablenew-proLableOld));
-//                }
-                //int sum1 = labelPorgCount(LocalM);
 
-                //int sum2 = labelPorgCount(LocalM);
-//                if (sum1 < sum2) {
-//                    System.out.println("new Propog labels =" + (sum2 - sum1));
-//                }
             }//while loop over stream
+            
+            File dir = new File(result_path + dname + "\\");
+            dir.mkdir();
+            
+            FileWriter fw = new FileWriter(result_path + dname + "\\" + "Actual_predictd_Label_ratio_" + labelPercentage[i] + ".txt");
+            fw.write(actual_predicted.toString());
+             fw.close();
+            Acc = ((double) correct / total_ins) * 100;
             System.out.println("Label Per = " + labelPercentage[i]);
             System.out.println("Accuracy = " + Acc);
+            accb.append(Acc).append("\n");
+            
             // System.out.println("Total new MC unlabeled=" + TotalnewUnLabdeld);
             //System.out.println("Total new MC after Lbprob=" + proLabelCount);
         }//main for loop end
+        FileWriter fw2 = new FileWriter(result_path + dname + "\\" + "Accu_"  + ".txt");
+            fw2.write(accb.toString());
+             fw2.close();
     }//functionend
 
-    public void createMC(SyncObject x, ArrayList<MicroCluster> LocalM, int currTime, double radius) {
+    public void updateModel(ArrayList<MicroCluster> Model, ArrayList<SyncObject> chunkBuffer, int currTime, int labelPercentage, double eRG) {
+        Utils.assignPartialLabel(chunkBuffer, labelPercentage);
+        Iterator<SyncObject> iterator = chunkBuffer.iterator();
+        while (iterator.hasNext()) {
+            SyncObject chunk_ins = iterator.next();
 
-        if (LocalM.size() == maxMC) {
+            ArrayList<Integer> p_label_idx = classify(chunk_ins, Model);
+            int p_label = p_label_idx.get(0);
+            int mc_idx = p_label_idx.get(1);
 
-            if (mergUnLb(LocalM) == 0) {
+            //error driven represenation
+            if (chunk_ins.label_flg == 1) {
+                if (p_label == chunk_ins.label) {
+                    double w = Model.get(mc_idx).weigth + 1;
+                    Model.get(mc_idx).setWeigth(w);
+                } else {
+                    double w = Model.get(mc_idx).weigth - 1;
+                    Model.get(mc_idx).setWeigth(w);
+                }
+            }
+        }
+        //weight over time
+        for (int i = 0; i < Model.size(); i++) {
+            double w = Model.get(i).weigth * Math.pow(2, -lamba * (currTime - Model.get(i).time));
+            Model.get(i).setWeigth(w);
 
-                mergMaxLb(LocalM);
+        }
+        ArrayList<MicroCluster> neg_lowWMC = new ArrayList<MicroCluster>();
+        for (int i = 0; i < Model.size(); i++) {
+            if (Model.get(i).weigth < wT) {
+                neg_lowWMC.add(Model.get(i));
+            }
+        }
+        Model.removeAll(neg_lowWMC);//delete negative and low weight
+        // new microclusters
+        double eRL = eRangData(chunkBuffer, eK);
+        ArrayList<MicroCluster> newMCs = clustering(chunkBuffer, eRL, currTime);
+        for (int i = 0; i < newMCs.size(); i++) {
+            insertNewMC(newMCs.get(i), Model, currTime);
+            //Model.add(newMCs.get(i));
+        }
+//        if (Model.size() > maxMC) {
+//            int noMCtoMerg = Model.size() - maxMC;
+//            findNearestMCPairs(Model, noMCtoMerg, currTime);
+//        }
+        chunkBuffer.clear();
+        //return Model;
+    }
+public void insertNewMC(MicroCluster nwmc, ArrayList<MicroCluster> Model, int currTime) {
+
+        if (Model.size() == maxMC) {
+
+            if (mergUnLb(Model) == 0) {
+
+                mergMaxLb(Model);
             }
         } //end if maxMC
-        double[] LS = x.data.clone();
-        double[] SS = new double[x.data.length];
-        int label = 0;
-        int label_flg = 0;
-        double[] center = x.data.clone();;
-        int tr_pse_flg = 0;
-        double weigth = 1;
-        int npts = 1;
-        for (int d = 0; d < x.data.length; d++) {
-            SS[d] += x.data[d] * x.data[d];
-        }
-        if (x.label_flg == 1) {
-            label = x.label;
-            label_flg = 1;
-            tr_pse_flg = 1;
-
-        }
-        MicroCluster ms = new MicroCluster(LS, SS, npts, label, label_flg, center, radius, tr_pse_flg, currTime, weigth);
-        LocalM.add(ms);
+        Model.add(nwmc);
     }//func end
 
-    public int mergUnLb(ArrayList<MicroCluster> LocalM) {
+    public int mergUnLb(ArrayList<MicroCluster> Model) {
         double minDist = Double.MAX_VALUE;
         int minI = 0;
         int minJ = 0;
         int flg = 0;
-        for (int i = 0; i < LocalM.size(); i++) {
-            for (int j = 0; j < LocalM.size(); j++) {
-                if (LocalM.get(i).label_flg == 0 && LocalM.get(j).label_flg == 1 && i != j) {
-                    double pdist = computeDistance(LocalM.get(i), LocalM.get(j));
+        for (int i = 0; i < Model.size(); i++) {
+            for (int j = 0; j < Model.size(); j++) {
+                if (Model.get(i).label_flg == 0 && Model.get(j).label_flg == 1 && i != j) {
+                    double pdist = computeDistance(Model.get(i), Model.get(j));
                     if (minDist > pdist) {
                         minDist = pdist;
                         minI = i;
@@ -203,27 +198,27 @@ public class SyncSemiMC {
             }//for j end
         }// for i end
         if (flg == 1) {
-            mergMC(LocalM, minI, minJ);
+            mergMC(Model, minI, minJ);
         }
         return flg;
     }
 
-    public void mergMaxLb(ArrayList<MicroCluster> LocalM) {
+    public void mergMaxLb(ArrayList<MicroCluster> Model) {
 
         ArrayList<Integer> label_list = new ArrayList<Integer>();
-        for (int i = 0; i < LocalM.size(); i++) {
-            if (LocalM.get(i).label_flg == 1) {
-                label_list.add(LocalM.get(i).label);
+        for (int i = 0; i < Model.size(); i++) {
+            if (Model.get(i).label_flg == 1) {
+                label_list.add(Model.get(i).label);
             }
         }
         int mmxlb = countFrequencies(label_list);
         double minDist = Double.MAX_VALUE;
         int minI = 0;
         int minJ = 0;
-        for (int i = 0; i < LocalM.size(); i++) {
-            for (int j = 0; j < LocalM.size(); j++) {
-                if (LocalM.get(i).label == mmxlb && LocalM.get(j).label == mmxlb && i != j) {
-                    double pdist = computeDistance(LocalM.get(i), LocalM.get(j));
+        for (int i = 0; i < Model.size(); i++) {
+            for (int j = 0; j < Model.size(); j++) {
+                if (Model.get(i).label == mmxlb && Model.get(j).label == mmxlb && i != j) {
+                    double pdist = computeDistance(Model.get(i), Model.get(j));
                     if (minDist > pdist) {
                         minDist = pdist;
                         minI = i;
@@ -233,125 +228,121 @@ public class SyncSemiMC {
                 }
             }//for j end
         }// for i end
-        mergMC(LocalM, minI, minJ);
+        mergMC(Model, minI, minJ);
     }
 
-    public void mergMC(ArrayList<MicroCluster> LocalM, int minI, int minJ) {
-        int dim = LocalM.get(minI).data.length;
+    public void mergMC(ArrayList<MicroCluster> Model, int minI, int minJ) {
+        int dim = Model.get(minI).data.length;
         for (int d = 0; d < dim; d++) {
-            LocalM.get(minJ).LS[d] += LocalM.get(minI).LS[d];
-            LocalM.get(minJ).SS[d] += LocalM.get(minI).SS[d];
+            Model.get(minJ).LS[d] += Model.get(minI).LS[d];
+            Model.get(minJ).SS[d] += Model.get(minI).SS[d];
         }
-        LocalM.get(minJ).npts += LocalM.get(minI).npts;
+        Model.get(minJ).npts += Model.get(minI).npts;
 
         double ls_sum = 0.0;
         double ss_sum = 0.0;
         double[] center = new double[dim];
         double radius = 0.0;
         for (int d = 0; d < dim; d++) {
-            center[d] = LocalM.get(minJ).LS[d] / LocalM.get(minJ).npts;
+            center[d] = Model.get(minJ).LS[d] / Model.get(minJ).npts;
             ls_sum += (center[d] * center[d]);
-            ss_sum += (LocalM.get(minJ).SS[d] / LocalM.get(minJ).npts);
+            ss_sum += (Model.get(minJ).SS[d] / Model.get(minJ).npts);
 //                sum += ( (SS[d] / npts) - (center[d]*center[d]) );
         }
 
         radius = Math.sqrt(ss_sum - ls_sum);
-        LocalM.get(minJ).setCenter(center);
-        LocalM.get(minJ).radius = radius;
-        if (LocalM.get(minJ).tr_pse_flg == 2 && LocalM.get(minI).tr_pse_flg == 1) {
-            LocalM.get(minJ).tr_pse_flg = 1;
-        }
-        LocalM.remove(minI);
+        Model.get(minJ).setCenter(center);
+        Model.get(minJ).radius = radius;
+//        if (LocalM.get(minJ).tr_pse_flg == 2 && LocalM.get(minI).tr_pse_flg == 1) {
+//            LocalM.get(minJ).tr_pse_flg = 1;
+//        }
+        Model.remove(minI);
         //LocalM.get(minJ).time = currTime;
     }
 
-    public void updateMC(SyncObject x, int index, ArrayList<MicroCluster> LocalM, int currTime) {
-        int dim = x.data.length;
+    public void findNearestMCPairs(ArrayList<MicroCluster> Model, int n, int currTime) {
+        ArrayList<Integer> comPair = new ArrayList<Integer>();
+        HashMap clusterIndex_distances = new HashMap<ArrayList<Integer>, Double>();
+        for (int i = 0; i < Model.size(); i++) {
+            for (int j = i + 1; j < Model.size(); j++) {
+                if ((Model.get(i).label_flg == 0 || Model.get(j).label_flg == 0) || (Model.get(i).label == Model.get(j).label)) {
+                    double pdist = computeDistance(Model.get(i), Model.get(j));
+                    ArrayList<Integer> pair = new ArrayList<Integer>();
+                    pair.add(i);
+                    pair.add(j);
+                    clusterIndex_distances.put(pair, pdist);
+                }
+            }//for j end
+        }// for i end
+
+        HashMap<Object, Object> sortedClusIndexDistances = Utils.sortByValues(clusterIndex_distances);
+        ArrayList<ArrayList> pairlist = new ArrayList<ArrayList>();
+        int f = 0;
+        for (Map.Entry<Object, Object> entrySet : sortedClusIndexDistances.entrySet()) {
+
+            ArrayList<Integer> minPairs = (ArrayList<Integer>) entrySet.getKey();
+            pairlist.add(minPairs);
+            if (f < 5) {
+                Double value = (Double) entrySet.getValue();
+                //System.out.println("values"+value);
+                f++;
+            }
+
+        }
+        ArrayList<MicroCluster> mcToDel = new ArrayList<MicroCluster>();
+        for (int i = 0; i < n; i++) {
+            mergMC(Model, (int) pairlist.get(i).get(0), (int) pairlist.get(i).get(1), currTime);
+            mcToDel.add(Model.get((int) pairlist.get(i).get(0)));
+        }
+        Model.removeAll(mcToDel);
+        int aa = 0;
+    }
+
+    public void mergMC(ArrayList<MicroCluster> Model, int minI, int minJ, int currTime) {
+        int dim = Model.get(minI).data.length;
         for (int d = 0; d < dim; d++) {
-            LocalM.get(index).LS[d] += x.data[d];
-            LocalM.get(index).SS[d] += (x.data[d] * x.data[d]);
+            Model.get(minJ).LS[d] += Model.get(minI).LS[d];
+            Model.get(minJ).SS[d] += Model.get(minI).SS[d];
         }
-        LocalM.get(index).npts++;
-        if (x.label_flg == 1 && LocalM.get(index).label_flg == 0) {
-            LocalM.get(index).label = x.label;
-            LocalM.get(index).label_flg = 1;
-            LocalM.get(index).tr_pse_flg = 1;
-        }
+        Model.get(minJ).npts += Model.get(minI).npts;
+
         double ls_sum = 0.0;
         double ss_sum = 0.0;
         double[] center = new double[dim];
         double radius = 0.0;
         for (int d = 0; d < dim; d++) {
-            center[d] = LocalM.get(index).LS[d] / LocalM.get(index).npts;
+            center[d] = Model.get(minJ).LS[d] / Model.get(minJ).npts;
             ls_sum += (center[d] * center[d]);
-            ss_sum += (LocalM.get(index).SS[d] / LocalM.get(index).npts);
+            ss_sum += (Model.get(minJ).SS[d] / Model.get(minJ).npts);
 //                sum += ( (SS[d] / npts) - (center[d]*center[d]) );
         }
 
         radius = Math.sqrt(ss_sum - ls_sum);
-        LocalM.get(index).setCenter(center);
-        LocalM.get(index).radius = radius;
-        LocalM.get(index).time = currTime;
-
-    }
-
-    public void updateModel(ArrayList<MicroCluster> LocalM, int currTime) {
-        ArrayList<MicroCluster> mcToDel = new ArrayList<MicroCluster>();
-        for (int i = 0; i < LocalM.size(); i++) {
-            double w = LocalM.get(i).weigth * Math.pow(2, -lamba * (currTime - LocalM.get(i).time));
-            LocalM.get(i).setWeigth(w);
-            if (w < wT) {
-                mcToDel.add(LocalM.get(i));
-            }
+        Model.get(minJ).setCenter(center);
+        Model.get(minJ).radius = radius;
+        if (Model.get(minJ).label_flg == 0 && Model.get(minI).label_flg == 1) {
+            Model.get(minJ).label_flg = 1;
+            Model.get(minJ).label_flg = Model.get(minI).label;
         }
-        LocalM.remove(mcToDel);
-
+        // Model.remove(minI);
+        Model.get(minJ).time = currTime;
     }
 
-    public ArrayList<Integer> classify(SyncObject inst, ArrayList<MicroCluster> LocalM, double eRG) {
+    public ArrayList<Integer> classify(SyncObject inst, ArrayList<MicroCluster> Model) {
         ArrayList<Integer> p_label_idx = new ArrayList<Integer>();
         double minDistL = Double.MAX_VALUE;
         int idxL = 0;
-        for (int i = 0; i < LocalM.size(); i++) {
-            if (LocalM.get(i).label_flg == 1) {
-                double dist = computeDistance(inst, LocalM.get(i));
+        for (int i = 0; i < Model.size(); i++) {
+            if (Model.get(i).label_flg == 1) {
+                double dist = computeDistance(inst, Model.get(i));
                 if (minDistL > dist) {
                     minDistL = dist;
                     idxL = i;
                 }
             }
         }
-//        if (minDistL <= eRG) {
-        p_label_idx.add(LocalM.get(idxL).label);
-//            Plocal++;
-//        } else {
-//            //For global model
-//            ArrayList<SyncObject> global_data = new ArrayList<SyncObject>();
-//            Iterator<MicroCluster> iterator = LocalM.iterator();
-//            while (iterator.hasNext()) {
-//                MicroCluster mcs = iterator.next();
-//                global_data.add(new SyncObject(mcs.getCenter().clone(), mcs.label, mcs.label_flg));
-//            }
-//            //double eRG1 = eRangMC(LocalM,eK);
-//            //double eRG2 = eRang(global_data, eK);
-//            // System.out.println("Gobal e-Rang using offset =" + eRG1);
-//            //System.out.println("Gobal e-Rang using Local =" + eRG2);
-//            ArrayList<MicroCluster> GlobalM = clustering(global_data, eRG);
-//            //System.out.println("Gobal Model Size(MCs) =" + GlobalM.size());
-//            double minDistG = Double.MAX_VALUE;
-//            int idxG = 0;
-//            for (int i = 0; i < GlobalM.size(); i++) {
-//                if (GlobalM.get(i).label_flg == 1) {
-//                    double dist = computeDistance(inst, GlobalM.get(i));
-//                    if (minDistG > dist) {
-//                        minDistG = dist;
-//                        idxG = i;
-//                    }
-//                }
-//            }
-//            p_label_idx.add(GlobalM.get(idxG).label);
-//            PGlobal++;
-//        }
+        p_label_idx.add(Model.get(idxL).label);
+
         p_label_idx.add(idxL);
         return p_label_idx;
     }
@@ -359,7 +350,7 @@ public class SyncSemiMC {
     /**
      * synchronization-based dynamic clustering
      */
-    public ArrayList<MicroCluster> clustering(ArrayList<SyncObject> data_orig, double eRange) {
+    public ArrayList<MicroCluster> clustering(ArrayList<SyncObject> data_orig, double eRange, int currTime) {
 
         int num = data_orig.size();
         int dim = data_orig.get(0).data.length;
@@ -424,7 +415,6 @@ public class SyncSemiMC {
                             minDist = minDist + dis;
                             cc++;
                         }
-
                     }
                 }
                 //System.out.println(n);
@@ -462,7 +452,7 @@ public class SyncSemiMC {
        // System.out.println("No of itration to converge = " + loopNum);
 
         //find the clusters
-        ArrayList<MicroCluster> mcs = findSynCluster(data_orig, data_copy, eRange);
+        ArrayList<MicroCluster> mcs = findSynCluster(data_orig, data_copy, eRange, currTime);
 
         return mcs;
     }
@@ -579,7 +569,7 @@ public class SyncSemiMC {
     }
 
 //    -------------------------------------------------------------
-    public static ArrayList<MicroCluster> findSynCluster(ArrayList<SyncObject> origdata, ArrayList<SyncObject> data, double eR) {
+    public static ArrayList<MicroCluster> findSynCluster(ArrayList<SyncObject> origdata, ArrayList<SyncObject> data, double eR, int currTime) {
 
         int len = data.size();
         int dim = data.get(0).data.length;
@@ -621,7 +611,7 @@ public class SyncSemiMC {
             double[] center = new double[dim];
             double radius = 0.0;
             int tr_pse_flg = 0;
-            int time = 1;
+            int time = currTime;
             double weigth = 1;
             for (int j = 0; j < npts; j++) {
                 int instance_idx = (int) cluster_items.get(j);
@@ -690,11 +680,12 @@ public class SyncSemiMC {
         return truelabel;
     }
 
-    private void clearLabels(ArrayList<SyncObject> buffer, HashSet<Integer> partialLabelStream, int defined_label) {
-        Iterator<Integer> iterator = partialLabelStream.iterator();
+    private void clearLabels(ArrayList<SyncObject> buffer) {
+        Iterator<SyncObject> iterator = buffer.iterator();
         while (iterator.hasNext()) {
-            Integer index = iterator.next();
-            buffer.get(index).setLabel_flg(defined_label);
+            SyncObject next = iterator.next();
+            next.setLabel_flg(0);
+
         }
     }
 
